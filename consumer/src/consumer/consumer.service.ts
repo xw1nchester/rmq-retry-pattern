@@ -1,6 +1,7 @@
 import { Injectable, Logger } from '@nestjs/common';
-import { RabbitMqService } from '../rabbit-mq/rabbit-mq.service';
+import { EventEmitter2 } from '@nestjs/event-emitter';
 import { ConsumeMessage } from 'amqplib';
+import { RabbitMqService } from '../rabbit-mq/rabbit-mq.service';
 
 @Injectable()
 export class ConsumerService {
@@ -8,7 +9,10 @@ export class ConsumerService {
     // simple in-memory store
     private processed = new Map<string, boolean>();
 
-    constructor(private readonly rabbit: RabbitMqService) {}
+    constructor(
+        private readonly rabbit: RabbitMqService,
+        private readonly eventEmitter: EventEmitter2
+    ) {}
 
     async onModuleInit() {
         const ch = this.rabbit.getChannel();
@@ -20,8 +24,16 @@ export class ConsumerService {
         if (!msg) return;
 
         const ch = this.rabbit.getChannel();
-        // const data = JSON.parse(msg.content.toString());
+        const data = JSON.parse(msg.content.toString());
         const messageId = msg.properties.messageId;
+
+        if(!data?.content) {
+            this.logger.warn(
+                `Invalid payload, content is required, messageId=${messageId}`
+            );
+            ch.ack(msg);
+            return;
+        }
 
         if (this.processed.has(messageId)) {
             this.logger.warn(
@@ -39,19 +51,19 @@ export class ConsumerService {
                 throw new Error('Temporary error');
             }
 
+            this.eventEmitter.emit('message', data.content)
+
             this.processed.set(messageId, true);
 
             ch.ack(msg);
 
             this.logger.log(`Processed successfully, messageId=${messageId}`);
         } catch (err) {
-            const message = err instanceof Error ? err.message : String(err);
-
             this.logger.error(
-                `Processing failed, messageId=${messageId}, error=${message}`
+                `Processing failed, messageId=${messageId}`,
+                err instanceof Error ? err.message : String(err)
             );
 
-            // ch.nack(msg, false, false);
             this.rabbit.retryMessage(msg, 3);
         }
     }
